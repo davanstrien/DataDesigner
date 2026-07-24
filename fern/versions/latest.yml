@@ -137,6 +137,12 @@ navigation:
             path: ./latest/pages/recipes/mcp_and_tooluse/pdf_qa.mdx
           - page: Nemotron Super Search Agent
             path: ./latest/pages/recipes/mcp_and_tooluse/search_agent.mdx
+      - section: Hugging Face Jobs
+        contents:
+          - page: Single-Job Generation
+            path: ./latest/pages/recipes/hf_jobs/single_job_generation.mdx
+          - page: Partitioned Multi-Job Generation
+            path: ./latest/pages/recipes/hf_jobs/partitioned_fanout.mdx
       - section: VLM Long-Document Understanding
         contents:
           - page: Seed Dataset Preparation

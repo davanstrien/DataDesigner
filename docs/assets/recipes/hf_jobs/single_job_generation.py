@@ -1,0 +1,241 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "data-designer",
+# ]
+# ///
+"""Single-Job Generation Recipe
+
+Run a Data Designer workload on a cloud job scheduler. This recipe uses Hugging Face Jobs
+(`hf jobs uv run`), but the script itself is scheduler-agnostic: because Data Designer performs
+inference through model provider APIs, generation is CPU-only and a small CPU machine can drive
+a large run against any OpenAI-compatible endpoint.
+
+The recipe generates question/answer pairs about machine learning dataset practices, with sampler
+columns steering topic, subtopic, and difficulty.
+
+The model is configurable in two ways:
+    - `--model-alias`: use a built-in or CLI-configured model alias (default: "nvidia-text").
+    - `--endpoint` + `--model` (+ optional `--api-key-env`): use any OpenAI-compatible endpoint,
+      such as the NVIDIA API Catalog, a self-hosted vLLM or NIM server, or a hosted inference router.
+
+Prerequisites:
+    - NVIDIA_API_KEY environment variable for the default "nvidia-text" model alias.
+    - For Hugging Face Jobs runs: `huggingface_hub` installed locally (provides the `hf` CLI)
+      and authentication via `hf auth login`.
+
+Run:
+    # Locally, with the default NVIDIA provider model alias
+    uv run single_job_generation.py --num-records 20
+
+    # Locally, against any OpenAI-compatible endpoint (example: Hugging Face Inference Providers)
+    uv run single_job_generation.py --num-records 20 \
+        --endpoint https://router.huggingface.co/v1 --model openai/gpt-oss-20b --api-key-env HF_TOKEN
+
+    # On a Hugging Face Job (the PEP 723 header above makes the script self-contained)
+    hf jobs uv run --flavor cpu-basic --timeout 30m --secrets HF_TOKEN \
+        single_job_generation.py \
+        --endpoint https://router.huggingface.co/v1 --model openai/gpt-oss-20b --api-key-env HF_TOKEN \
+        --num-records 200 --push-to-hub <your-username>/synthetic-qa-demo
+"""
+
+from __future__ import annotations
+
+from argparse import ArgumentParser
+
+import data_designer.config as dd
+from data_designer.interface import DataDesigner, DatasetCreationResults
+
+CUSTOM_PROVIDER_NAME = "custom-endpoint"
+CUSTOM_MODEL_ALIAS = "custom-endpoint-model"
+
+TOPICS = {
+    "data cleaning": ["deduplication", "handling missing values", "outlier detection", "text normalization"],
+    "data licensing": ["permissive licenses", "copyleft licenses", "dataset attribution", "scraped-data rights"],
+    "dataset documentation": ["dataset cards", "collection methodology", "known limitations", "intended uses"],
+    "evaluation data": [
+        "benchmark contamination",
+        "test-set leakage",
+        "annotation quality",
+        "inter-annotator agreement",
+    ],
+    "synthetic data": ["distillation", "self-instruct", "seeded generation", "synthetic-data filtering"],
+}
+
+
+def build_config(model_alias: str, model_configs: list[dd.ModelConfig] | None = None) -> dd.DataDesignerConfigBuilder:
+    config_builder = dd.DataDesignerConfigBuilder(model_configs=model_configs)
+
+    config_builder.add_column(
+        dd.SamplerColumnConfig(
+            name="topic",
+            sampler_type=dd.SamplerType.CATEGORY,
+            params=dd.CategorySamplerParams(values=list(TOPICS.keys())),
+        )
+    )
+
+    config_builder.add_column(
+        dd.SamplerColumnConfig(
+            name="subtopic",
+            sampler_type=dd.SamplerType.SUBCATEGORY,
+            params=dd.SubcategorySamplerParams(category="topic", values=TOPICS),
+        )
+    )
+
+    config_builder.add_column(
+        dd.SamplerColumnConfig(
+            name="difficulty",
+            sampler_type=dd.SamplerType.CATEGORY,
+            params=dd.CategorySamplerParams(values=["beginner", "intermediate", "advanced"]),
+        )
+    )
+
+    config_builder.add_column(
+        dd.LLMTextColumnConfig(
+            name="question",
+            model_alias=model_alias,
+            prompt=(
+                "Write one specific, practical question a {{ difficulty }}-level ML practitioner "
+                "might ask about {{ subtopic }} (in the context of {{ topic }}). "
+                "Respond with only the question."
+            ),
+        )
+    )
+
+    config_builder.add_column(
+        dd.LLMTextColumnConfig(
+            name="answer",
+            model_alias=model_alias,
+            prompt=(
+                "Answer the following question about {{ subtopic }} accurately and concisely "
+                "(under 200 words), for a {{ difficulty }}-level reader.\n\n"
+                "Question: {{ question }}\n\nRespond with only the answer."
+            ),
+        )
+    )
+
+    return config_builder
+
+
+def build_custom_model(
+    endpoint: str,
+    model: str,
+    api_key_env: str | None,
+    max_parallel_requests: int,
+) -> tuple[dd.ModelProvider, dd.ModelConfig]:
+    """Build a provider and model config for an arbitrary OpenAI-compatible endpoint."""
+    provider = dd.ModelProvider(
+        name=CUSTOM_PROVIDER_NAME,
+        endpoint=endpoint,
+        api_key=api_key_env,
+    )
+    model_config = dd.ModelConfig(
+        alias=CUSTOM_MODEL_ALIAS,
+        model=model,
+        provider=CUSTOM_PROVIDER_NAME,
+        inference_parameters=dd.ChatCompletionInferenceParams(
+            temperature=0.8,
+            top_p=0.95,
+            max_tokens=1024,
+            max_parallel_requests=max_parallel_requests,
+        ),
+        # Not every OpenAI-compatible gateway implements the model-listing endpoint used by the health check.
+        skip_health_check=True,
+    )
+    return provider, model_config
+
+
+def run_recipe(
+    config_builder: dd.DataDesignerConfigBuilder,
+    *,
+    num_records: int,
+    artifact_path: str | None = None,
+    dataset_name: str = "single_job_generation",
+    model_providers: list[dd.ModelProvider] | None = None,
+) -> DatasetCreationResults:
+    data_designer = DataDesigner(artifact_path=artifact_path, model_providers=model_providers)
+    return data_designer.create(config_builder, num_records=num_records, dataset_name=dataset_name)
+
+
+def build_arg_parser() -> ArgumentParser:
+    parser = ArgumentParser()
+    parser.add_argument("--model-alias", type=str, default="nvidia-text")
+    parser.add_argument(
+        "--endpoint",
+        type=str,
+        default=None,
+        help="Optional OpenAI-compatible endpoint URL. Overrides --model-alias when provided with --model.",
+    )
+    parser.add_argument("--model", type=str, default=None, help="Model identifier to request from --endpoint.")
+    parser.add_argument(
+        "--api-key-env",
+        type=str,
+        default=None,
+        help="Name of the environment variable holding the API key for --endpoint (e.g. HF_TOKEN).",
+    )
+    parser.add_argument(
+        "--max-parallel-requests",
+        type=int,
+        default=16,
+        help="Concurrent requests to --endpoint. See the Architecture & Performance guide for tuning.",
+    )
+    parser.add_argument("--num-records", type=int, default=5)
+    parser.add_argument("--artifact-path", type=str, default=None)
+    parser.add_argument("--dataset-name", type=str, default="single_job_generation")
+    parser.add_argument(
+        "--push-to-hub",
+        type=str,
+        default=None,
+        help="Optional Hugging Face dataset repo id (e.g. username/my-dataset) to upload results to.",
+    )
+    parser.add_argument("--private", action="store_true", help="Create the Hub dataset repo as private.")
+    return parser
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
+    if (args.endpoint is None) != (args.model is None):
+        raise ValueError("--endpoint and --model must be provided together.")
+
+    model_providers: list[dd.ModelProvider] | None = None
+    model_configs: list[dd.ModelConfig] | None = None
+    model_alias = args.model_alias
+    if args.endpoint is not None:
+        provider, model_config = build_custom_model(
+            endpoint=args.endpoint,
+            model=args.model,
+            api_key_env=args.api_key_env,
+            max_parallel_requests=args.max_parallel_requests,
+        )
+        model_providers = [provider]
+        model_configs = [model_config]
+        model_alias = CUSTOM_MODEL_ALIAS
+
+    config_builder = build_config(model_alias=model_alias, model_configs=model_configs)
+    results = run_recipe(
+        config_builder,
+        num_records=args.num_records,
+        artifact_path=args.artifact_path,
+        dataset_name=args.dataset_name,
+        model_providers=model_providers,
+    )
+
+    print(f"Dataset saved to: {results.artifact_storage.final_dataset_path}")
+    results.display_sample_record()
+
+    if args.push_to_hub is not None:
+        url = results.push_to_hub(
+            args.push_to_hub,
+            description=(
+                "Synthetic question/answer pairs about machine learning dataset practices, "
+                "generated with NeMo Data Designer."
+            ),
+            private=args.private,
+        )
+        print(f"Dataset pushed to: {url}")
+
+
+if __name__ == "__main__":
+    main()

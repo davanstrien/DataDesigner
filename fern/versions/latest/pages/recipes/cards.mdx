@@ -149,6 +149,21 @@ Recipes are a collection of code examples that demonstrate how to leverage Data 
   </Card>
 </CardGroup>
 
+## Hugging Face Jobs
+
+<CardGroup cols={2}>
+  <Card title="Single-Job Generation" icon="cloud" href="/recipes/hugging-face-jobs/single-job-generation">
+    Run a generation workload on a small cloud CPU machine against any OpenAI-compatible endpoint, and push the results to the Hugging Face Hub.
+
+    *Cloud jobs · any OpenAI-compatible provider · `push_to_hub`*
+  </Card>
+  <Card title="Partitioned Multi-Job Generation" icon="layer-group" href="/recipes/hugging-face-jobs/partitioned-multi-job-generation">
+    Split a seed dataset into N partitions with `PartitionBlock` and run one independent cloud job per partition, collecting shards in one Hub dataset.
+
+    *`PartitionBlock` fan-out · independent shards · per-partition retry*
+  </Card>
+</CardGroup>
+
 ## VLM Long-Document Understanding
 
 A 9-recipe pipeline for generating visual QA training data from long PDF documents: OCR, page classification, single-page / multi-page / whole-document QA, and frontier-model quality filtering.
